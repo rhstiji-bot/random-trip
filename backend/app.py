@@ -1324,3 +1324,15 @@ def api_list_selections(trip_id: int):
             (trip_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+    from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import os
+
+FRONT_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+
+app.mount("/frontend", StaticFiles(directory=FRONT_DIR), name="frontend")
+
+@app.get("/")
+def root():
+    return FileResponse(os.path.join(FRONT_DIR, "index.html"))
+
