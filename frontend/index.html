@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Random Trip</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 16px; }
+    h1 { font-size: 20px; margin: 8px 0 16px; }
+    label { display:block; margin-top: 10px; font-size: 13px; opacity: .85; }
+    input, select, button { width: 100%; font-size: 16px; padding: 10px; margin-top: 6px; }
+    button { cursor: pointer; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-top: 12px; }
+    .muted { opacity: .7; font-size: 12px; }
+    .row { display:flex; gap:10px; }
+    .row > div { flex:1; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Random Trip（MVP）</h1>
+
+  <div class="card">
+    <div class="muted">出発地を検索して選んでください</div>
+
+    <label>出発地検索（駅名など）</label>
+    <input id="q" placeholder="例）神戸 / 東京 / 札幌" />
+
+    <button id="btnSearch">出発地を検索</button>
+
+    <label>出発地（origin_place_id）</label>
+    <select id="origin"></select>
+
+    <div class="row">
+      <div>
+        <label>開始日</label>
+        <input id="start" type="date" />
+      </div>
+      <div>
+        <label>終了日</label>
+        <input id="end" type="date" />
+      </div>
+    </div>
+
+    <label>予算（円）</label>
+    <input id="budget" type="number" value="50000" />
+
+    <button id="btnGenerate">旅を生成（/v1/trips/generate）</button>
+  </div>
+
+  <div id="candidates" class="card" style="display:none;">
+    <h2 style="font-size:16px;margin:0 0 8px;">候補</h2>
+    <div id="candList"></div>
+  </div>
+
+  <div id="result" class="card" style="display:none;">
+    <h2 style="font-size:16px;margin:0 0 8px;">確定結果</h2>
+    <pre id="resultPre"></pre>
+  </div>
+
+  <div class="card">
+    <div class="muted">デバッグ</div>
+    <pre id="log"></pre>
+  </div>
+
+<script>
+  // 同じドメインで配信するので通常は空でOK（/v1/...にアクセスする）
+  // もし別ドメインにするなら: const API_BASE = "https://random-trip-xxxx.onrender.com";
+  const API_BASE = "";
+
+  const $ = (id) => document.getElementById(id);
+  const log = (x) => { $("log").textContent = (typeof x === "string" ? x : JSON.stringify(x, null, 2)); };
+
+  function todayPlus(days){
+    const d = new Date(); d.setDate(d.getDate()+days);
+    return d.toISOString().slice(0,10);
+  }
+  $("start").value = todayPlus(7);
+  $("end").value = todayPlus(9);
+
+  async function api(path, opts={}){
+    const res = await fetch(API_BASE + path, {
+      headers: { "Content-Type":"application/json", "Accept":"application/json" },
+      ...opts
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+    if(!res.ok) throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+    return data;
+  }
+
+  async function searchPlaces(){
+    const q = $("q").value.trim();
+    const params = new URLSearchParams();
+    if(q) params.set("q", q);
+    params.set("limit","50");
+    // type=STATION とかが効く実装なら入れる（効かないなら無視されます）
+    params.set("type","STATION");
+
+    const places = await api("/v1/places?" + params.toString());
+    const sel = $("origin");
+    sel.innerHTML = "";
+    for(const p of places){
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.name}（id:${p.id}）`;
+      sel.appendChild(opt);
+    }
+    if(places.length === 0){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "見つかりませんでした";
+      sel.appendChild(opt);
+    }
+    log({found: places.length, sample: places[0]});
+  }
+
+  async function generateTrip(){
+    const origin_place_id = Number($("origin").value);
+    const start_date = $("start").value;
+    const end_date = $("end").value;
+    const budget_yen = Number($("budget").value || 0);
+
+    const body = {
+      origin_place_id,
+      start_date,
+      end_date,
+      budget_yen,
+      preferred_tags: [],
+      excluded_tags: [],
+      avoid_selected: true
+    };
+
+    const data = await api("/v1/trips/generate", { method:"POST", body: JSON.stringify(body) });
+    log(data);
+
+    const tripId = data.trip_id;
+    const candList = $("candList");
+    candList.innerHTML = "";
+
+    for(const c of (data.candidates || [])){
+      const div = document.createElement("div");
+      div.className = "card";
+      const name = c.destination?.name ?? "(unknown)";
+      const destId = c.destination?.id;
+      const cost = c.total_cost_yen;
+      const minutes = c.reason?.travel_minutes;
+
+      div.innerHTML = `
+        <div><b>${name}</b> <span class="muted">（dest_id:${destId} / trip_id:${tripId}）</span></div>
+        <div class="muted">目安: ${minutes ?? "-"}分 / ${cost ?? "-"}円</div>
+        <button data-dest="${destId}" data-trip="${tripId}">これに決定</button>
+      `;
+      div.querySelector("button").onclick = () => selectCandidate(tripId, destId, name);
+      candList.appendChild(div);
+    }
+
+    $("candidates").style.display = "block";
+    $("result").style.display = "none";
+  }
+
+  async function selectCandidate(trip_id, destination_place_id, note){
+    const body = { destination_place_id, note };
+    const data = await api(`/v1/trips/${trip_id}/select`, { method:"POST", body: JSON.stringify(body) });
+    log(data);
+
+    // 確定後、詳細を取得して表示
+    const detail = await api(`/v1/trips/${trip_id}`);
+    $("resultPre").textContent = JSON.stringify(detail, null, 2);
+    $("result").style.display = "block";
+  }
+
+  $("btnSearch").onclick = () => searchPlaces().catch(e => log(String(e)));
+  $("btnGenerate").onclick = () => generateTrip().catch(e => log(String(e)));
+
+  // 初回検索しておく
+  searchPlaces().catch(()=>{});
+</script>
+</body>
+</html>
